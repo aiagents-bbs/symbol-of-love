@@ -898,6 +898,9 @@
       if(window.EcomTracker) EcomTracker.purchase(orderId, { value: t.grand, quantity: qty, phone: phone, name: name });
     }
     var zoneText = zoneSel.options[zoneSel.selectedIndex].text.split(" — ")[0];
+    /* Send the order to the admin API so it appears in the dashboard.
+       Fail-soft: the confirmation + WhatsApp flow still work if the API is unreachable. */
+    if(window.EcomTracker && EcomTracker.submitOrder) EcomTracker.submitOrder({ id: orderId, customer: name, phone: phone, address: addr, product: "Symbol of Love — ৪ পিস কম্বো", quantity: qty, total: t.grand, payment: "COD", area: zoneText });
     var lines = [
       "নতুন অর্ডার — Symbol of Love (৪ পিস কম্বো)",
       "অর্ডার আইডি: " + orderId,
@@ -1339,6 +1342,13 @@
         contents: [{ id: cfg.productId, quantity: q }],
         order_id: orderId
       }, { phone: opts.phone, name: opts.name });
+    },
+    /* Send a completed order to the admin API so it appears in the dashboard.
+       Fail-soft: apiPost catches errors; the host page's confirmation and
+       WhatsApp flow do not depend on this call. */
+    submitOrder: function(order){
+      if(!order || !order.id) return;
+      apiPost("/orders", order);
     }
   };
 })();

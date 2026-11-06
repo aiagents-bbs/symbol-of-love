@@ -375,6 +375,13 @@
         contents: [{ id: cfg.productId, quantity: q }],
         order_id: orderId
       }, { phone: opts.phone, name: opts.name });
+    },
+    /* Send a completed order to the admin API so it appears in the dashboard.
+       Fail-soft: apiPost catches errors; the host page's confirmation and
+       WhatsApp flow do not depend on this call. */
+    submitOrder: function(order){
+      if(!order || !order.id) return;
+      apiPost("/orders", order);
     }
   };
 })();
