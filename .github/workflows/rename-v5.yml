@@ -1,0 +1,23 @@
+name: Rename v5 files
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rename:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rename v5 temp files over live files
+        run: |
+          git config user.name "aiagents-bbs"
+          git config user.email "aiagents-bbs@users.noreply.github.com"
+          git mv -f v5temp/landing-page-demo.html index.html
+          git mv -f v5temp/ecom-tracker.js ecom-tracker.js
+          rmdir v5temp
+          git status --short
+          git commit -m "Deploy v5 landing page and tracker with Advanced Matching" -m "Replace index.html and ecom-tracker.js with v5 files containing Advanced Matching (setAdvancedMatching, buildUserData, country bd)."
+          git push
