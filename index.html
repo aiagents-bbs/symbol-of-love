@@ -1114,60 +1114,85 @@
   }
 
   /* ---------- conversion events: Pixel + admin API (CAPI relay) ---------- */
+  function pixelTrack(eventName, eventId, customData, pixelUserData){
+    var opts = { eventID: eventId };
+    if(pixelUserData) opts.user_data = pixelUserData;
+    if(pixelState === "on"){
+      try { fbq("track", eventName, customData, opts); } catch(err){}
+    } else if(pixelState === "pending"){
+      fbqQueue.push(["track", eventName, customData, opts]);
+    }
+  }
+  function buildPixelUserData(keys, hashes){
+    /* Pixel track-level user_data: SHA-256 hashes as SINGLE strings
+       (NOT arrays — the array form is only for the admin API). Unlike
+       init-level matching, fbevents.js does not hash track-level
+       user_data itself, so the values must arrive pre-hashed. Keys
+       whose hash is unavailable are omitted. */
+    var out = {};
+    keys.forEach(function(k, i){ if(hashes[i]) out[k] = hashes[i]; });
+    return Object.keys(out).length ? out : null;
+  }
   function trackEvent(eventName, eventId, customData, userInfo){
     var plain = plaintextUserData(userInfo);
     var isPurchase = eventName === "Purchase";
     /* Advanced Matching (Purchase only): re-init with PLAINTEXT values
        immediately before the Purchase track — fbevents.js hashes them
-       itself, so they must NOT be pre-hashed here. */
+       itself, so they must NOT be pre-hashed here. This stays in place
+       as the fallback when track-level hashing is unavailable. */
     if(isPurchase){
       var pid = activePixelId || cfg.pixelId;
       if(pixelState === "on" && pid){
         try { fbq("init", pid, plain); } catch(err){}
-        try { fbq("track", eventName, customData, { eventID: eventId }); } catch(err){}
       } else if(pixelState === "pending"){
         if(pid) fbqQueue.push(["init", pid, plain]);
-        fbqQueue.push(["track", eventName, customData, { eventID: eventId }]);
       }
-    } else if(pixelState === "on"){
-      try { fbq("track", eventName, customData, { eventID: eventId }); } catch(err){}
-    } else if(pixelState === "pending"){
-      fbqQueue.push(["track", eventName, customData, { eventID: eventId }]);
     }
-    /* Admin API (CAPI relay): ph/fn/ln/country go SHA-256 hashed and
-       ARRAY-wrapped; fbp/fbc stay plaintext strings. Fail-soft: if
-       hashing is unavailable the fields are simply omitted. */
+    /* SHA-256 hashes of the normalised values, computed once and used
+       for BOTH the Pixel track-level user_data (single hash strings,
+       via buildPixelUserData) and the admin API payload below
+       (array-wrapped). Fail-soft: a key whose hash is unavailable is
+       simply omitted. */
     var keys = ["ph", "fn", "ln", "country"];
     var hashJobs = keys.map(function(k){
       return plain[k] ? sha256Hex(plain[k]) : Promise.resolve(undefined);
     });
+    /* Admin API (CAPI relay): ph/fn/ln/country go SHA-256 hashed and
+       ARRAY-wrapped; fbp/fbc stay plaintext strings. */
+    function sendApi(hashes){
+      var userData = {};
+      keys.forEach(function(k, i){ if(hashes && hashes[i]) userData[k] = [hashes[i]]; });
+      var fbp = cookieVal("_fbp"); if(fbp) userData.fbp = fbp;
+      var fbc = cookieVal("_fbc"); if(fbc) userData.fbc = fbc;
+      apiPost("/events", {
+        event_name: eventName,
+        event_id: eventId,
+        event_time: Math.floor(Date.now() / 1000),
+        event_source_url: document.URL,
+        action_source: "website",
+        user_data: userData,
+        custom_data: customData
+      });
+    }
+    if(!userInfo){
+      /* No user data to attach: fire the Pixel event right away,
+         exactly as before. */
+      pixelTrack(eventName, eventId, customData, null);
+      Promise.all(hashJobs).then(sendApi, function(){ sendApi(null); });
+      return;
+    }
+    /* Track-level user_data (v6): when user info is present, the
+       fbq('track') call waits for the SHA-256 hashes and then carries
+       them in its 4th argument next to eventID. If hashing produces
+       nothing (e.g. crypto.subtle unavailable), the event still fires
+       without user_data — the plaintext re-init above is the fallback,
+       so an event is never blocked. */
     Promise.all(hashJobs).then(function(hashes){
-      var userData = {};
-      keys.forEach(function(k, i){ if(hashes[i]) userData[k] = [hashes[i]]; });
-      var fbp = cookieVal("_fbp"); if(fbp) userData.fbp = fbp;
-      var fbc = cookieVal("_fbc"); if(fbc) userData.fbc = fbc;
-      apiPost("/events", {
-        event_name: eventName,
-        event_id: eventId,
-        event_time: Math.floor(Date.now() / 1000),
-        event_source_url: document.URL,
-        action_source: "website",
-        user_data: userData,
-        custom_data: customData
-      });
+      pixelTrack(eventName, eventId, customData, buildPixelUserData(keys, hashes));
+      sendApi(hashes);
     }, function(){
-      var userData = {};
-      var fbp = cookieVal("_fbp"); if(fbp) userData.fbp = fbp;
-      var fbc = cookieVal("_fbc"); if(fbc) userData.fbc = fbc;
-      apiPost("/events", {
-        event_name: eventName,
-        event_id: eventId,
-        event_time: Math.floor(Date.now() / 1000),
-        event_source_url: document.URL,
-        action_source: "website",
-        user_data: userData,
-        custom_data: customData
-      });
+      pixelTrack(eventName, eventId, customData, null);
+      sendApi(null);
     });
   }
 

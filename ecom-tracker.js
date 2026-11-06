@@ -4,7 +4,7 @@
    Meta Pixel + standard events + admin-API send (for server-side
    CAPI) + visitor behaviour tracker.
    Extracted verbatim from the Symbol of Love landing page
-   (landing-page-demo, v5) on 2026-11-06. Do not edit the code
+   (landing-page-demo, v6) on 2026-11-06. Do not edit the code
    below — configure it only through the script tag (see paste
    line at the bottom of the usage doc) or window.ECOM_CONFIG.
 
@@ -37,9 +37,12 @@
    or the order form.
    Page hook for purchases (call on successful order submit):
      EcomTracker.purchase(orderId, { value, quantity, phone, name })
-   Advanced Matching (v5): the Pixel gets PLAINTEXT ph/fn/ln/country
-   (fbevents.js hashes them); the admin-API user_data carries the same
-   fields SHA-256 hashed in arrays. Pixel init carries country 'bd'.
+   Advanced Matching (v6): the Pixel gets PLAINTEXT ph/fn/ln/country
+   at init (fbevents.js hashes them), AND the Purchase track call
+   carries user_data directly - ph/fn/ln/country PRE-HASHED with
+   SHA-256 as single strings (track-level user_data is not hashed
+   by the Pixel). The admin-API user_data carries the same fields
+   SHA-256 hashed in arrays. Pixel init carries country 'bd'.
    where orderId = EcomTracker.newOrderId() — the SAME id is
    the order's ID, the Pixel Purchase eventID and the API
    event_id, so Meta deduplicates browser + CAPI copies.
@@ -119,6 +122,16 @@
     jobs.push(sha256Hex("bd").then(function(h){ if(h) out.country = [h]; }));
     return Promise.all(jobs).then(function(){ return out; });
   }
+  function buildPixelUserData(userInfo){ /* track-level user_data: SHA-256 hashed STRINGS */
+    var jobs = [], out = {};
+    var ph = (userInfo && userInfo.phone) ? normalizePhone(userInfo.phone) : "";
+    var nm = (userInfo && userInfo.name) ? normalizeName(userInfo.name) : {};
+    if(ph) jobs.push(sha256Hex(ph).then(function(h){ if(h) out.ph = h; }));
+    if(nm.fn) jobs.push(sha256Hex(nm.fn).then(function(h){ if(h) out.fn = h; }));
+    if(nm.ln) jobs.push(sha256Hex(nm.ln).then(function(h){ if(h) out.ln = h; }));
+    jobs.push(sha256Hex("bd").then(function(h){ if(h) out.country = h; }));
+    return Promise.all(jobs).then(function(){ return out; });
+  }
   function parseNum(text){ /* reads Latin, Bengali and Arabic-Indic digits */
     if(text == null) return NaN;
     var map = {"০":"0","১":"1","২":"2","৩":"3","৪":"4","৫":"5","৬":"6","৭":"7","৮":"8","৯":"9",
@@ -188,10 +201,20 @@
   /* ---------- conversion events: Pixel + admin API (CAPI relay) ---------- */
   function trackEvent(eventName, eventId, customData, userInfo){
     if(userInfo && (userInfo.phone || userInfo.name)) setAdvancedMatching(userInfo);
-    if(pixelState === "on"){
-      try { fbq("track", eventName, customData, { eventID: eventId }); } catch(err){}
-    } else if(pixelState === "pending"){
-      fbqQueue.push(["track", eventName, customData, { eventID: eventId }]);
+    var hasInfo = !!(userInfo && (userInfo.phone || userInfo.name));
+    var firePixel = function(pixelUserData){
+      var opts = { eventID: eventId };
+      if(pixelUserData && Object.keys(pixelUserData).length) opts.user_data = pixelUserData;
+      if(pixelState === "on"){
+        try { fbq("track", eventName, customData, opts); } catch(err){}
+      } else if(pixelState === "pending"){
+        fbqQueue.push(["track", eventName, customData, opts]);
+      }
+    };
+    if(hasInfo){
+      buildPixelUserData(userInfo).then(firePixel, function(){ firePixel(null); });
+    } else {
+      firePixel(null);
     }
     var send = function(userData){
       var fbp = cookieVal("_fbp"); if(fbp) userData.fbp = fbp;
