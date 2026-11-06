@@ -895,7 +895,7 @@
     var orderId = currentOrderId;
     if(!orderSubmitted){
       orderSubmitted = true;
-      if(window.EcomTracker) EcomTracker.purchase(orderId, { value: t.grand, quantity: qty, phone: phone });
+      if(window.EcomTracker) EcomTracker.purchase(orderId, { value: t.grand, quantity: qty, phone: phone, name: name });
     }
     var zoneText = zoneSel.options[zoneSel.selectedIndex].text.split(" — ")[0];
     var lines = [
@@ -970,7 +970,7 @@
      Everything is fail-soft: a dead API never blocks the page
      or the order form.
      Page hook for purchases (call on successful order submit):
-       EcomTracker.purchase(orderId, { value, quantity, phone })
+       EcomTracker.purchase(orderId, { value, quantity, phone, name })
      where orderId = EcomTracker.newOrderId() — the SAME id is
      the order's ID, the Pixel Purchase eventID and the API
      event_id, so Meta deduplicates browser + CAPI copies.
@@ -1017,6 +1017,34 @@
     if(d.charAt(0) === "0") return "880" + d.slice(1);
     return d;
   }
+  var COUNTRY = "bd";
+  function splitName(raw){ /* first word -> fn, rest -> ln; lowercase + trim */
+    var clean = String(raw || "").trim().toLowerCase();
+    if(!clean) return {};
+    var parts = clean.split(/\s+/);
+    var out = { fn: parts[0] };
+    if(parts.length > 1) out.ln = parts.slice(1).join(" ");
+    return out;
+  }
+  function plaintextUserData(userInfo){
+    /* Normalised PLAINTEXT values for ph/fn/ln/country.
+       userInfo may be a phone string or { phone, name }. */
+    var out = { country: COUNTRY };
+    if(!userInfo) return out;
+    if(typeof userInfo === "string"){
+      var p0 = normalizePhone(userInfo); if(p0) out.ph = p0;
+      return out;
+    }
+    if(userInfo.phone){
+      var p1 = normalizePhone(userInfo.phone); if(p1) out.ph = p1;
+    }
+    if(userInfo.name){
+      var np = splitName(userInfo.name);
+      if(np.fn) out.fn = np.fn;
+      if(np.ln) out.ln = np.ln;
+    }
+    return out;
+  }
   function parseNum(text){ /* reads Latin, Bengali and Arabic-Indic digits */
     if(text == null) return NaN;
     var map = {"০":"0","১":"1","২":"2","৩":"3","৪":"4","৫":"5","৬":"6","৭":"7","৮":"8","৯":"9",
@@ -1049,9 +1077,11 @@
 
   /* ---------- Meta Pixel (official base code) ---------- */
   var pixelState = "pending"; /* pending -> on | off */
+  var activePixelId = "";
   var fbqQueue = [];
   function loadPixel(id){
     if(pixelState === "on" || !id) return;
+    activePixelId = String(id);
     !function(f,b,e,v,n,t,s){
       if(f.fbq) return; n = f.fbq = function(){ n.callMethod ?
         n.callMethod.apply(n, arguments) : n.queue.push(arguments); };
@@ -1060,7 +1090,7 @@
       t.src = v; s = b.getElementsByTagName(e)[0];
       s.parentNode.insertBefore(t, s);
     }(window, document, "script", "https://connect.facebook.net/en_US/fbevents.js");
-    fbq("init", id);
+    fbq("init", id, { country: COUNTRY });
     fbq("track", "PageView");
     pixelState = "on";
     var q = fbqQueue; fbqQueue = [];
@@ -1084,15 +1114,36 @@
   }
 
   /* ---------- conversion events: Pixel + admin API (CAPI relay) ---------- */
-  function trackEvent(eventName, eventId, customData, rawPhone){
-    if(pixelState === "on"){
+  function trackEvent(eventName, eventId, customData, userInfo){
+    var plain = plaintextUserData(userInfo);
+    var isPurchase = eventName === "Purchase";
+    /* Advanced Matching (Purchase only): re-init with PLAINTEXT values
+       immediately before the Purchase track — fbevents.js hashes them
+       itself, so they must NOT be pre-hashed here. */
+    if(isPurchase){
+      var pid = activePixelId || cfg.pixelId;
+      if(pixelState === "on" && pid){
+        try { fbq("init", pid, plain); } catch(err){}
+        try { fbq("track", eventName, customData, { eventID: eventId }); } catch(err){}
+      } else if(pixelState === "pending"){
+        if(pid) fbqQueue.push(["init", pid, plain]);
+        fbqQueue.push(["track", eventName, customData, { eventID: eventId }]);
+      }
+    } else if(pixelState === "on"){
       try { fbq("track", eventName, customData, { eventID: eventId }); } catch(err){}
     } else if(pixelState === "pending"){
       fbqQueue.push(["track", eventName, customData, { eventID: eventId }]);
     }
-    var send = function(phHash){
+    /* Admin API (CAPI relay): ph/fn/ln/country go SHA-256 hashed and
+       ARRAY-wrapped; fbp/fbc stay plaintext strings. Fail-soft: if
+       hashing is unavailable the fields are simply omitted. */
+    var keys = ["ph", "fn", "ln", "country"];
+    var hashJobs = keys.map(function(k){
+      return plain[k] ? sha256Hex(plain[k]) : Promise.resolve(undefined);
+    });
+    Promise.all(hashJobs).then(function(hashes){
       var userData = {};
-      if(phHash) userData.ph = phHash;
+      keys.forEach(function(k, i){ if(hashes[i]) userData[k] = [hashes[i]]; });
       var fbp = cookieVal("_fbp"); if(fbp) userData.fbp = fbp;
       var fbc = cookieVal("_fbc"); if(fbc) userData.fbc = fbc;
       apiPost("/events", {
@@ -1104,9 +1155,20 @@
         user_data: userData,
         custom_data: customData
       });
-    };
-    if(rawPhone) sha256Hex(normalizePhone(rawPhone)).then(send, function(){ send(undefined); });
-    else send(undefined);
+    }, function(){
+      var userData = {};
+      var fbp = cookieVal("_fbp"); if(fbp) userData.fbp = fbp;
+      var fbc = cookieVal("_fbc"); if(fbc) userData.fbc = fbc;
+      apiPost("/events", {
+        event_name: eventName,
+        event_id: eventId,
+        event_time: Math.floor(Date.now() / 1000),
+        event_source_url: document.URL,
+        action_source: "website",
+        user_data: userData,
+        custom_data: customData
+      });
+    });
   }
 
   /* ViewContent — once per page load, own unique event ID. */
@@ -1251,7 +1313,7 @@
         currency: cfg.currency,
         contents: [{ id: cfg.productId, quantity: q }],
         order_id: orderId
-      }, opts.phone);
+      }, { phone: opts.phone, name: opts.name });
     }
   };
 })();

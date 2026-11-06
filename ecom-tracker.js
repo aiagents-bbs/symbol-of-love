@@ -4,7 +4,7 @@
    Meta Pixel + standard events + admin-API send (for server-side
    CAPI) + visitor behaviour tracker.
    Extracted verbatim from the Symbol of Love landing page
-   (landing-page-demo, v4) on 2026-11-05. Do not edit the code
+   (landing-page-demo, v5) on 2026-11-06. Do not edit the code
    below — configure it only through the script tag (see paste
    line at the bottom of the usage doc) or window.ECOM_CONFIG.
 
@@ -36,7 +36,10 @@
    Everything is fail-soft: a dead API never blocks the page
    or the order form.
    Page hook for purchases (call on successful order submit):
-     EcomTracker.purchase(orderId, { value, quantity, phone })
+     EcomTracker.purchase(orderId, { value, quantity, phone, name })
+   Advanced Matching (v5): the Pixel gets PLAINTEXT ph/fn/ln/country
+   (fbevents.js hashes them); the admin-API user_data carries the same
+   fields SHA-256 hashed in arrays. Pixel init carries country 'bd'.
    where orderId = EcomTracker.newOrderId() — the SAME id is
    the order's ID, the Pixel Purchase eventID and the API
    event_id, so Meta deduplicates browser + CAPI copies.
@@ -82,6 +85,40 @@
     if(d.charAt(0) === "0") return "880" + d.slice(1);
     return d;
   }
+  function normalizeName(raw){ /* first word -> fn, rest -> ln, lowercase */
+    var s = String(raw || "").trim().replace(/\s+/g, " ").toLowerCase();
+    if(!s) return {};
+    var i = s.indexOf(" ");
+    if(i === -1) return { fn: s };
+    return { fn: s.slice(0, i), ln: s.slice(i + 1) };
+  }
+  function advancedMatchingParams(userInfo){ /* PLAINTEXT - the Pixel hashes */
+    var p = { country: "bd" };
+    if(userInfo){
+      if(userInfo.phone){ var d = normalizePhone(userInfo.phone); if(d) p.ph = d; }
+      if(userInfo.name){ var n = normalizeName(userInfo.name); if(n.fn) p.fn = n.fn; if(n.ln) p.ln = n.ln; }
+    }
+    return p;
+  }
+  function setAdvancedMatching(userInfo){
+    if(!cfg.pixelId) return;
+    var params = advancedMatchingParams(userInfo);
+    if(pixelState === "on"){
+      try { fbq("init", cfg.pixelId, params); } catch(err){}
+    } else if(pixelState === "pending"){
+      fbqQueue.push(["init", cfg.pixelId, params]);
+    }
+  }
+  function buildUserData(userInfo){ /* CAPI shape: SHA-256 hashed ARRAYS */
+    var jobs = [], out = {};
+    var ph = (userInfo && userInfo.phone) ? normalizePhone(userInfo.phone) : "";
+    var nm = (userInfo && userInfo.name) ? normalizeName(userInfo.name) : {};
+    if(ph) jobs.push(sha256Hex(ph).then(function(h){ if(h) out.ph = [h]; }));
+    if(nm.fn) jobs.push(sha256Hex(nm.fn).then(function(h){ if(h) out.fn = [h]; }));
+    if(nm.ln) jobs.push(sha256Hex(nm.ln).then(function(h){ if(h) out.ln = [h]; }));
+    jobs.push(sha256Hex("bd").then(function(h){ if(h) out.country = [h]; }));
+    return Promise.all(jobs).then(function(){ return out; });
+  }
   function parseNum(text){ /* reads Latin, Bengali and Arabic-Indic digits */
     if(text == null) return NaN;
     var map = {"০":"0","১":"1","২":"2","৩":"3","৪":"4","৫":"5","৬":"6","৭":"7","৮":"8","৯":"9",
@@ -125,7 +162,7 @@
       t.src = v; s = b.getElementsByTagName(e)[0];
       s.parentNode.insertBefore(t, s);
     }(window, document, "script", "https://connect.facebook.net/en_US/fbevents.js");
-    fbq("init", id);
+    fbq("init", id, { country: "bd" });
     fbq("track", "PageView");
     pixelState = "on";
     var q = fbqQueue; fbqQueue = [];
@@ -149,15 +186,14 @@
   }
 
   /* ---------- conversion events: Pixel + admin API (CAPI relay) ---------- */
-  function trackEvent(eventName, eventId, customData, rawPhone){
+  function trackEvent(eventName, eventId, customData, userInfo){
+    if(userInfo && (userInfo.phone || userInfo.name)) setAdvancedMatching(userInfo);
     if(pixelState === "on"){
       try { fbq("track", eventName, customData, { eventID: eventId }); } catch(err){}
     } else if(pixelState === "pending"){
       fbqQueue.push(["track", eventName, customData, { eventID: eventId }]);
     }
-    var send = function(phHash){
-      var userData = {};
-      if(phHash) userData.ph = phHash;
+    var send = function(userData){
       var fbp = cookieVal("_fbp"); if(fbp) userData.fbp = fbp;
       var fbc = cookieVal("_fbc"); if(fbc) userData.fbc = fbc;
       apiPost("/events", {
@@ -170,8 +206,7 @@
         custom_data: customData
       });
     };
-    if(rawPhone) sha256Hex(normalizePhone(rawPhone)).then(send, function(){ send(undefined); });
-    else send(undefined);
+    buildUserData(userInfo).then(send, function(){ send({}); });
   }
 
   /* ViewContent — once per page load, own unique event ID. */
@@ -316,7 +351,7 @@
         currency: cfg.currency,
         contents: [{ id: cfg.productId, quantity: q }],
         order_id: orderId
-      }, opts.phone);
+      }, { phone: opts.phone, name: opts.name });
     }
   };
 })();
